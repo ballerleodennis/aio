@@ -2663,3 +2663,213 @@ und in `run()` vor `md.append("## Lokale Chain-Indizes")`:
 **Bevor du testest:** `reports/1402_offsets.txt` gegen `ps4_offsets.js` gegenprüfen. Die Datei markiert ihre Adressen selbst als `PENDING VERIFICATION`; `PRISON0`/`ROOTVNODE`/`SYSENT` stimmen mit der 13.00–14.00-Linie überein, das ist ein gutes Zeichen, aber keine Bestätigung.
 
 Soll ich als nächstes einen **Vergleichsdump** bauen, der `1402_offsets.txt` gegen die Tabellen aus 13.52/14.00/akatsuki diffed und abweichende Adressen rot markiert? Damit siehst du auf einen Blick, welche Angaben aus der Baseline übernommen wurden und welche wirklich 14.02-spezifisch sind.
+
+
+
+_______________________________________
+
+
+`offset_diff.py` — liest `1402_offsets.txt`, zieht die Tabellen aus `ps4_offsets.js` (13.52, 14.00, 14.02) und klassifiziert jede Adresse: übernommen, abweichend, verwaist.
+
+---
+
+### `offset_diff.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Offset-Gegenprobe: 1402_offsets.txt vs. ps4_offsets.js (13.52 / 14.00 / 14.02).
+
+Klassifiziert jede Angabe:
+  ORPHAN   nur in der 14.02-Datei, nirgends gegengeprueft   -> rot
+  SPECIFIC von allen anderen abweichend                     -> gruen, VERIFIZIEREN
+  PARTIAL  deckt sich mit einer Quelle, nicht mit der anderen -> gelb
+  INHERITED identisch mit beiden -> von 14.00 uebernommen    -> grau
+  UNDEF    Zielwert existiert, ist aber undefined            -> violett
+"""
+import html, json, os, re, sys
+from datetime import datetime
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+REPORTS = os.path.join(ROOT, "reports")
+os.makedirs(REPORTS, exist_ok=True)
+
+SRC_TXT = os.path.join(REPORTS, "1402_offsets.txt")
+JS = os.path.join(ROOT, "chains", "akatsuki-1402", "ps4_offsets.js")
+if not os.path.isfile(JS):
+    JS = os.path.join(ROOT, "ps4_offsets.js")
+
+# txt-Name -> JS-Schluessel
+ALIAS = {
+    "PRISON0": "k_prison0", "ROOTVNODE": "k_rootvnode", "SYSENT": "k_sysent",
+    "XFAST_SYSCALL": "k_xfast_syscall", "M_TEMP": "k_m_temp",
+    "ALLPROC": "k_allproc", "FPU_CTX": "k_fpu_ctx",
+    "memcmp": "k_memcmp", "_sx_xlock": "k_sx_xlock", "_sx_xunlock": "k_sx_xunlock",
+    "malloc": "k_malloc", "free": "k_free", "strstr": "k_strstr",
+    "memcpy": "k_memcpy", "memset": "k_memset", "strlen": "k_strlen",
+    "printf": "k_printf", "fpu_kern_enter": "k_fpu_kern_enter",
+    "fpu_kern_leave": "k_fpu_kern_leave",
+    "eventhandler_register": "k_eventhandler_register",
+}
+RANK = {"ORPHAN": 0, "SPECIFIC": 1, "PARTIAL": 2, "UNDEF": 3, "INHERITED": 4}
+COLOR = {"ORPHAN": "#ff5c6c", "SPECIFIC": "#48d597", "PARTIAL": "#ffb347",
+         "UNDEF": "#b48cff", "INHERITED": "#6d7d94"}
+
+
+def parse_txt(path):
+    out = {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        m = re.match(r"\s*([A-Za-z_]\w*)\s*=\s*(0x[0-9A-Fa-f]+)", line)
+        if m:
+            out[m.group(1)] = int(m.group(2), 16)
+    return out
+
+
+def js_tables(path):
+    text = open(path, encoding="utf-8", errors="replace").read()
+    out = {}
+    for m in re.finditer(r'PS4\[\s*"([\d.]+)"\s*\]\s*=\s*', text):
+        fw = m.group(1)
+        i = text.find("{", m.end())
+        if i < 0:
+            continue
+        tail = text[i:]
+        ends = [x for x in (tail.find("\n};"), tail.find("\n});")) if x > 0]
+        block = tail[:min(ends)] if ends else tail[:20000]
+        tbl = {}
+        for km in re.finditer(r'([A-Za-z_]\w*)\s*:\s*(0x[0-9A-Fa-f]+|undefined)', block):
+            tbl[km.group(1)] = None if km.group(2) == "undefined" else int(km.group(2), 16)
+        out[fw] = tbl
+    return out
+
+
+def classify(name, val, a, b):
+    ka = ALIAS.get(name, name)
+    va, vb = a.get(ka), b.get(ka)
+    if va is None and vb is None:
+        return "ORPHAN" if ka not in a and ka not in b else "UNDEF"
+    if va is not None and vb is not None:
+        if val == va == vb:
+            return "INHERITED"
+        if val == va or val == vb:
+            return "PARTIAL"
+        return "SPECIFIC"
+    if (va is not None and val == va) or (vb is not None and val == vb):
+        return "PARTIAL"
+    return "SPECIFIC"
+
+
+def run(emit=print):
+    if not os.path.isfile(SRC_TXT):
+        emit("error", "reports/1402_offsets.txt fehlt — Analyzer laufen lassen")
+        return None
+    if not os.path.isfile(JS):
+        emit("error", "ps4_offsets.js fehlt — Chain akatsuki-1402 nicht geladen")
+        return None
+
+    txt = parse_txt(SRC_TXT)
+    tables = js_tables(JS)
+    t1352 = tables.get("13.52", {})
+    t1400 = tables.get("14.00", {})
+    t1402 = tables.get("14.02", {})
+
+    rows = []
+    for name, val in txt.items():
+        k = classify(name, val, t1352, t1400)
+        ka = ALIAS.get(name, name)
+        rows.append({"name": name, "key": ka, "val": val,
+                     "v1352": t1352.get(ka), "v1400": t1400.get(ka),
+                     "v1402": t1402.get(ka), "class": k})
+    rows.sort(key=lambda r: (RANK[r["class"]], r["name"]))
+
+    counts = {}
+    for r in rows:
+        counts[r["class"]] = counts.get(r["class"], 0) + 1
+    emit("diff", "Gegenprobe: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    json.dump({"stamp": stamp, "counts": counts, "rows": rows},
+              open(os.path.join(REPORTS, f"offsetdiff-{stamp}.json"), "w"), indent=2)
+
+    h = ["<meta charset=utf-8><title>Offset-Gegenprobe</title>",
+         "<style>body{background:#0a0d12;color:#cbd6e6;font:13px ui-monospace,monospace;"
+         "padding:18px}h1{font-size:15px;color:#4fd1c5}table{border-collapse:collapse;"
+         "width:100%;font-size:12px}td,th{padding:4px 7px;border-bottom:1px solid #1e2836;"
+         "text-align:left}th{color:#6d7d94;font-size:10px;text-transform:uppercase}"
+         "code{color:#5aa9ff}.n{color:#3a4553}</style>",
+         f"<h1>Offset-Gegenprobe 14.02 — {stamp}</h1>",
+         "<p>Quelle: <code>reports/1402_offsets.txt</code> gegen <code>ps4_offsets.js</code>. "
+         "Die Datei markiert sich selbst als PENDING VERIFICATION.</p>",
+         "<p>" + " · ".join(f"<b style='color:{COLOR[k]}'>{k}={v}</b>"
+                            for k, v in sorted(counts.items())) + "</p>",
+         "<table><tr><th>Name</th><th>14.02</th><th>13.52</th><th>14.00</th>"
+         "<th>14.02-Tabelle</th><th>Klasse</th></tr>"]
+    for r in rows:
+        f = lambda v: f"<code>0x{v:08X}</code>" if v is not None else "<span class=n>—</span>"
+        h.append(f"<tr style='border-left:3px solid {COLOR[r['class']]}'>"
+                 f"<td>{html.escape(r['name'])}</td><td>{f(r['val'])}</td>"
+                 f"<td>{f(r['v1352'])}</td><td>{f(r['v1400'])}</td><td>{f(r['v1402'])}</td>"
+                 f"<td style='color:{COLOR[r['class']]}'>{r['class']}</td></tr>")
+    h.append("</table>")
+
+    p = os.path.join(REPORTS, f"offsetdiff-{stamp}.html")
+    open(p, "w", encoding="utf-8").write("\n".join(h))
+    emit("diff", f"Report: reports/offsetdiff-{stamp}.html")
+    return p
+
+
+if __name__ == "__main__":
+    run(lambda k, m: print(f"[{k}] {m}"))
+```
+
+### Server-Anbindung
+
+`import offset_diff` neben `import make_manifest`, dann in `do_POST`:
+
+```python
+        if p == "/api/offsetdiff":
+            def job():
+                try:
+                    offset_diff.run(emit)
+                except Exception as e:
+                    emit("error", f"offsetdiff: {e}")
+            threading.Thread(target=job, daemon=True).start()
+            return self._json({"ok": True})
+```
+
+und in `do_GET`, vor `/api/scan`:
+
+```python
+        if p == "/api/offsetdiff":
+            fs = sorted((f for f in os.listdir(REPORTS)
+                         if f.startswith("offsetdiff-") and f.endswith(".html")), reverse=True)
+            if not fs:
+                return self._json({"file": None})
+            return self._raw(open(os.path.join(REPORTS, fs[0]), "rb").read(),
+                             "text/html; charset=utf-8")
+```
+
+### Dashboard-Button
+
+In `index.html` unter den anderen Buttons:
+
+```html
+      <button onclick="fetch('/api/offsetdiff',{method:'POST'}).then(()=>log('diff','gestartet')).then(()=>setTimeout(()=>window.open('/api/offsetdiff'),4000))">Offset-Gegenprobe</button>
+```
+
+---
+
+## Wie du das liest
+
+Die Farben sind die Aussage:
+
+- **rot (ORPHAN)** — nur in der 14.02-Datei, in keiner Tabelle gegengeprüft. `XFAST_SYSCALL`, `M_TEMP`, `ALLPROC`, `FPU_CTX` und alle Funktionsnamen (`memcmp`, `_sx_xlock`, `malloc` …) landen hier, weil `ps4_offsets.js` für 14.00 die Kernel-Keys auf `undefined` setzt. Heißt: **null Kreuzbestätigung**, jeder Wert kann falsch sein.
+- **grün (SPECIFIC)** — weicht von 13.52 *und* 14.00 ab. Das sind die interessanten Zeilen, aber grün heißt hier nicht „bestätigt", sondern „echt 14.02-spezifisch, prüfen".
+- **gelb (PARTIAL)** — deckt sich mit einer Quelle. Entweder von 13.52 durchgezogen oder 14.00 übernommen, aber inkonsistent.
+- **grau (INHERITED)** — identisch mit beiden. Reine Übernahme aus der 13.00–14.00-Linie; `PRISON0 0x0111FA18`, `ROOTVNODE 0x02136E90` und `SYSENT 0x01102B70` fallen typischerweise hierher, weil die `.data`-Adressen über die Builds stabil sind.
+- **violett (UNDEF)** — Schlüssel existiert, Wert ist `undefined` (das komplette 14.00-Kernel-Set).
+
+Praktische Konsequenz: wenn `afterglow-g.js` scheitert, ist `ALLPROC` und `M_TEMP` der erste Verdacht — die braucht der Prozess-Walk, und beide sind unbestätigt. `PRISON0`/`ROOTVNODE` als grau eingestufte Werte sind die, bei denen ein Fehler am ehesten durchrutscht, weil sie plausibel aussehen.
+
+Zwei Dinge noch: `ps4_offsets.js` ist ES-Modul-Code, mein Extraktor liest ihn rein textuell — bei Umformatierung durch Upstream kann die Block-Erkennung brechen, dann `ORPHAN`-Lawine als Signal dafür nehmen. Und die 14.02-Tabelle ist im Original ein `Object.assign` auf 14.00, weshalb die vierte Spalte fast überall leer bleibt; das ist selbst der Befund.

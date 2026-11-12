@@ -2531,3 +2531,135 @@ Speichern — der Watcher zieht das Repo, setzt Lade-Reihenfolge und Entry, baut
 - Nur `--watch` startet ihn. Ohne Flag bleibt alles wie vorher, `/api/watch/rebuild` funktioniert trotzdem als Einmal-Trigger.
 
 Damit ist die Kette zu: neue Chain → automatisch gehostet und gebundelt → Konsole bekommt es gemeldet → ein Klick auf Auto-Chain testet sie auf 14.02. Was fehlt, ist nur noch das Auftauchen der SaudiDos-Artefakte.
+
+
+_______________________________________
+
+
+
+Ich hab sie gefunden — und zwar nicht die SaudiDos-Postings, sondern **lauffähige Artefakte für 14.02**, die seit heute Morgen online sind:
+
+| Fund | Was drin ist |
+|---|---|
+| `Jfkkfjzkz/ps4-akatsuki-jailbreak` (Commit vor 12 h) | `PS4["14.02"]`-Offset-Eintrag, `afterglow-g.js` mit **Runtime-Shiftfit** statt fester 14.02-Tabelle, `jb-g.js`-Host, `debug.bin`-Payload, Referrer-Guard, `no-store`-Pflicht |
+| `adri22235/ps4-suid-scanner` → `1402_offsets.txt` | 14.02-Kernel-Baseline: `PRISON0 0x0111FA18`, `ROOTVNODE 0x02136E90`, `SYSENT 0x01102B70`, `ALLPROC 0x01B28538` — Status **PENDING VERIFICATION** |
+
+Der Widerspruch ist wichtig: die Offset-Datei sagt „APM Subsystem: Patched race condition (Afterglow mitigated in 14.02)", akatsuki sagt „läuft". `afterglow-g.js` löst das ohne eigene Tabelle: Anker wird per Doppel-Messung ermittelt, bei Off-Grid um den Rest verschoben, `swap_rbp`-Gadget über Byte-Scan `4e 95 c3` neu gesucht, Patch-Offsets über `SHIFTS`-Liste nachgezogen. Deshalb funktioniert derselbe Code auf 14.02 — oder eben nicht, dann ist der APM-UAF wirklich zu.
+
+`kernel_1402.bin` und `patchset.bin` werden vom JS-Pfad übrigens **nicht** benutzt. Nur `debug.bin` (muss mit `0xe9` beginnen).
+
+## Was ich einbaue
+
+Erstens: akatsuki als **Host-Chain** — nicht als Modul-Chain, weil `jb-g.js`/`afterglow-g.js` ES-Module mit `export` sind und mein klassischer Loader daran scheitert. Host-Modus heißt: Seite wird unverändert ausgeliefert, Kette läuft in ihrer eigenen Logik. Zweitens: der Analyzer überwacht die vier Artefakt-URLs auf Änderungen.
+
+---
+
+### `chains.json` — Eintrag ergänzen (in `"chains"`, vor dem WebKitty-Block)
+
+```json
+{
+  "id": "akatsuki-1402",
+  "name": "Akatsuki 14.02 (afterglow, shiftfit)",
+  "repo": "Jfkkfjzkz/ps4-akatsuki-jailbreak",
+  "mode": "host",
+  "entry_url": "index.html",
+  "userland": "raw13g (jb-g.js)",
+  "kernel": "afterglow-g (Runtime-Shiftfit)",
+  "firmware": ["14.00", "14.02"],
+  "test_14_02": true,
+  "payloads": ["debug.bin"],
+  "coldstart": true,
+  "notes": "EINZIGE oeffentliche 14.02-Quelle. Referrer-Guard: immer ueber index.html einsteigen, nie direkt launch.html. debug.bin muss mit 0xe9 beginnen. patchset.bin/kernel_1402.bin vom JS-Pfad ungenutzt. Bei 'handles are NOT defused': Konsole kalt starten.",
+  "credit": "iDntUseModz (Host/Theme), raw13g (Substrat), jordyidk (slopkit), Al-Azif, SiSTRo"
+}
+```
+
+### `exploit.html` — Host-Modus
+
+In `renderMatrix()` ersetze den Button-Block durch:
+
+```js
+      ${c.mode === "host"
+        ? `<button class="p" style="width:auto;padding:4px 10px;font-size:11px;margin-top:5px"
+             data-open="${c.id}" data-url="${c.entry_url || "index.html"}">→ Host öffnen</button>`
+        : `<button style="width:auto;padding:3px 9px;font-size:11px;margin-top:5px"
+             data-c="${c.id}">wählen</button>`}
+```
+
+und hänge nach dem `data-c`-Binding an:
+
+```js
+  el("matrix").querySelectorAll("button[data-open]").forEach(b =>
+    b.onclick = () => {
+      const ch = CHAINS.find(x => x.id === b.dataset.open);
+      log("stage", "öffne Host-Chain " + ch.id);
+      if (ch.coldstart) log("warn", "Cold-Start-Regel: bei Abbruch Konsole neu starten, nicht nur Browser");
+      sessionStorage.setItem("aio.return", "1");
+      location.href = `/chains/${ch.id}/${b.dataset.url}`;
+    });
+```
+
+`compat()` erweitern, damit 14.02 bei Host-Chains als kompatibel gilt — das ist mit `test_14_02` schon erfüllt. `autoChain()` filtert auf `c.installed && c.mode !== "host"`; Host-Chains sind Klick-Ziele, nicht Auto-Ziele.
+
+### `ps4_analyzer.py` — Artefakt-Wächter
+
+Nach `QUERIES` einfügen:
+
+```python
+WATCH_TARGETS = [
+    "https://raw.githubusercontent.com/Jfkkfjzkz/ps4-akatsuki-jailbreak/main/ps4_offsets.js",
+    "https://raw.githubusercontent.com/Jfkkfjzkz/ps4-akatsuki-jailbreak/main/afterglow-g.js",
+    "https://raw.githubusercontent.com/Jfkkfjzkz/ps4-akatsuki-jailbreak/main/TECHNICAL.md",
+    "https://raw.githubusercontent.com/Jfkkfjzkz/ps4-akatsuki-jailbreak/main/debug.bin",
+    "https://raw.githubusercontent.com/adri22235/ps4-suid-scanner/main/1402_offsets.txt",
+]
+HASH_DB = os.path.join(ROOT, "reports", ".artifact-hashes.json")
+
+
+def watch_artifacts(emit):
+    import hashlib
+    try:
+        old = json.load(open(HASH_DB))
+    except Exception:
+        old = {}
+    new, changed = {}, []
+    for u in WATCH_TARGETS:
+        try:
+            blob = _get(u, timeout=45)
+        except Exception as e:
+            emit("error", f"artifact {u.rsplit('/', 1)[-1]}: {e}")
+            continue
+        h = hashlib.sha256(blob).hexdigest()
+        new[u] = h
+        if old.get(u) and old[u] != h:
+            changed.append(u)
+            emit("artifact", f"GEAENDERT: {u.rsplit('/', 1)[-1]} ({h[:8]})")
+        if not old.get(u):
+            emit("artifact", f"neu beobachtet: {u.rsplit('/', 1)[-1]}")
+        if u.endswith((".txt", ".md")):
+            open(os.path.join(REPORTS, "artifact-" + u.rsplit("/", 1)[-1]),
+                 "wb").write(blob)
+    json.dump(new, open(HASH_DB, "w"), indent=2)
+    return changed
+```
+
+und in `run()` vor `md.append("## Lokale Chain-Indizes")`:
+
+```python
+    md.append("## Artefakt-Wächter")
+    ch = watch_artifacts(emit)
+    md += [f"- GEÄNDERT: {c}" for c in ch] or ["- keine Änderung"]
+    md.append("")
+```
+
+---
+
+## Der Fund in Kurzform
+
+**Was 14.02 angeht, ist die Lage damit besser als noch heute früh:** es gibt einen Host, der 14.02 explizit listet und dessen Kernel-Stage ohne feste Tabelle arbeitet. Realistisch bleiben drei Ausgänge — läuft, scheitert an der APM-Race, oder stirbt still beim Heap-Reclaim. Der dritte ist normal und kostet nur einen Kaltstart.
+
+**Die offenen Kandidaten aus der Offset-Analyse**, falls APM wirklich zu ist: `CVE-2026-49415` (`kern_exec.c`, FreeBSD-9-Kern, ungepatcht), `CVE-2026-101308` (Sound-Buffer-mmap-UAF), `CVE-2026-58087` (semctl-15-Bit-Wrap). Das sind die Kernel-Bugs, an denen ein 14.02-Port als nächstes ansetzen müsste — die WebKit-Seite (CSSFontFace-UAF) ist in 14.02 gepatcht, weshalb der Einstieg über raw13g/slopkit laufen muss und nicht über PSFree.
+
+**Bevor du testest:** `reports/1402_offsets.txt` gegen `ps4_offsets.js` gegenprüfen. Die Datei markiert ihre Adressen selbst als `PENDING VERIFICATION`; `PRISON0`/`ROOTVNODE`/`SYSENT` stimmen mit der 13.00–14.00-Linie überein, das ist ein gutes Zeichen, aber keine Bestätigung.
+
+Soll ich als nächstes einen **Vergleichsdump** bauen, der `1402_offsets.txt` gegen die Tabellen aus 13.52/14.00/akatsuki diffed und abweichende Adressen rot markiert? Damit siehst du auf einen Blick, welche Angaben aus der Baseline übernommen wurden und welche wirklich 14.02-spezifisch sind.

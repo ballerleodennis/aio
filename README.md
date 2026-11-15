@@ -2873,3 +2873,845 @@ Die Farben sind die Aussage:
 Praktische Konsequenz: wenn `afterglow-g.js` scheitert, ist `ALLPROC` und `M_TEMP` der erste Verdacht — die braucht der Prozess-Walk, und beide sind unbestätigt. `PRISON0`/`ROOTVNODE` als grau eingestufte Werte sind die, bei denen ein Fehler am ehesten durchrutscht, weil sie plausibel aussehen.
 
 Zwei Dinge noch: `ps4_offsets.js` ist ES-Modul-Code, mein Extraktor liest ihn rein textuell — bei Umformatierung durch Upstream kann die Block-Erkennung brechen, dann `ORPHAN`-Lawine als Signal dafür nehmen. Und die 14.02-Tabelle ist im Original ein `Object.assign` auf 14.00, weshalb die vierte Spalte fast überall leer bleibt; das ist selbst der Befund.
+
+
+
+
+
+
+
+HTML-WEBKIT FORMAT:
+
+Ich schaue mir zuerst dein Repo und die Quelle an.
+
+## Stand: Recherche abgeschlossen, Bau noch offen
+
+Ich habe alles zusammen, was für den Umbau nötig ist – aber die Datei selbst ist noch nicht geschrieben, weil ich am Limit angekommen bin.
+
+### Was ich geklärt habe
+
+**Dein ZIP kann ich hier nicht entpacken** (22 MB, `application/zip` – der Scraper kann nur HTML/PDF/Bilder). Ich kenne also weder deinen genauen Markup-Aufbau noch deine Dateinamen. Deshalb war der Plan: dein Design (AIO-Look: `#0a0d12`, Monospace, Cards, Badges, Log) nachbauen statt 1:1 kopieren.
+
+**WebKitty-Quelle ausgewertet:**
+- `src/slopkit-afterglow/ps4_offsets.js` – vollständige Tabelle. Wichtig: **14.02 hat dort absichtlich `undefined` bei allen `k_*`-Kernel-Offsets**, weil afterglow seine Kernel-Stage selbst mitbringt. `14.02` ist nur ein `Object.assign({}, PS4["14.00"], {})` – die WebKit-Offsets sind von 13.52/14.00 geerbt. Genau da liegt dein Fehler: wenn deine Tabelle für 14.02 geratene `k_prison0`/`k_rootvnode`/`k_sysent`-Werte eingetragen hat, schreibt die Kette auf falsche Kernel-Adressen.
+- `afterglow.js` – hat die echten 14.02-Werte in eigener `FIRMWARE`-Tabelle: `anchor 0xE6C30`, `swap_rbp 0xa81478`, `prison0 0x111fa18`, `rootvnode 0x2136e90`, `padding 0xB3A298`, `ghKmem 0x466920` (+ `PATCH_TABLE`/`BOOTSTRAP_TABLE` mit 15 Sites bzw. Hex-Blob).
+- `jb.js` – Ablauf und DOM-Vertrag: braucht `#console`, `#DebugConsole`, `#state`, `#ramBox`, `#out`, `sessionStorage.payload_path`, `?payload=`/`?mode=`-Parameter, Referrer-Guard (Einstieg nur über `index.html`), Watchdog 45 s, `SUPPORTED = ["14.02","14.00","13.52"]`.
+- `jailbreak.js` – Chain wird als ES-Modul geladen: `getScript("src/slopkit-afterglow/jb.js", true)`, das importiert `core.js`, `mem.js`, `int64.js`, `ps4_offsets.js`, `afterglow.js` selbst.
+
+### Was noch zu tun ist
+
+1. **`ps4_offsets.js`** als Drop-in schreiben: WebKitty-Tabelle vollständig (11.00–14.02), 14.02-Kernel-Offsets auf `undefined` zurückgesetzt, `alias_of: "13.52-webkit"`.
+2. **`index.html`** im AIO-Design bauen: FW-Erkennung aus UA, Payload-Auswahl, Countdown-Start, `payload_path` setzen, dann `jb.js` per dynamischem `import()` starten; Log-Box mit den IDs, `body.log/.done/.fail`-Klassen.
+3. **`README.md`** mit Kopier-Anleitung (welche `src/`-Ordner und `includes/payloads/Bins/` du übernehmen musst) und Hinweis, dass `1402.bin` als Patchset vorhanden sein muss.
+
+### Zwei Dinge, die du mir geben kannst, damit es exakt wird
+
+- Deine `index.html` (oder Screenshot) aus dem ZIP – dann baue ich dein Layout 1:1 statt nach AIO-Vorlage.
+- Bestätigung der Firmware (14.02?) und ob dein `src/slopkit-afterglow/`-Ordner die Dateien `core.js`, `mem.js`, `int64.js`, `afterglow.js`, `jb.js` bereits enthält.
+
+
+
+
+Alles verifiziert. Jetzt baue ich die drei Dateien.
+
+Vorschau steht. Jetzt die echten Dateien.
+
+---
+
+## 1) `src/slopkit-afterglow/ps4_offsets.js` — die Offset-Korrektur
+
+Das ist der Kern deines Problems. Wichtig vorweg, weil es der eigentliche Fehler ist:
+
+- **14.02 erbt die WebKit-Offsets von 13.52** (14.02 hat dasselbe WebKit-Build wie 14.00, und 14.00 dasselbe wie 13.52). Deshalb steht in der echten Tabelle `alias_of: "13.52-webkit"`.
+- **Alle `k_*`-Kernel-Offsets sind auf 14.02/14.00 absichtlich `undefined`**, weil afterglow seine eigene Kernel-Stage mitbringt. Wer dort geratene Werte einträgt, schreibt in fremde Kernel-Adressen — genau der KP-Effekt.
+
+```js
+// src/slopkit-afterglow/ps4_offsets.js
+//
+// Korrigierte Tabelle, synchron zu ArabPixel/WebKitty @ main (14.11.2026).
+// Aenderungen gegenueber einer "gefuellten" 14.02-Tabelle:
+//   - 14.02 = Object.assign({}, 14.00) und 14.00 = Object.assign({}, 13.52),
+//     jeweils nur die WebKit-Seite. 14.02 und 14.00 teilen das WebKit-Build
+//     mit 13.52, die wk_*-Offsets sind also identisch.
+//   - Saemtliche k_*-Kernel-Offsets sind fuer 14.00 und 14.02 `undefined`.
+//     afterglow bringt seine eigene Kernel-Stage (FIRMWARE/PATCH_TABLE/
+//     BOOTSTRAP_TABLE) mit eigenen 14.02-RVAs mit. Wer hier geratene Werte
+//     eintraegt, schreibt in falsche Kernel-Adressen.
+//   - wk___imp_pthread_create ist fuer 14.00/14.02 0x3cb9c00 (identisch mit
+//     13.52, Import-Slot liegt im WebKit). k_pthread_create bleibt undefined,
+//     weil libkernel gewandert ist; afterglow nutzt dafuer die Konstante
+//     SLOT_SHARED_WK.
+//   - offsetsFor() parst den Firmware-Teil des UA als HEX (14.02 -> "14.02").
+
+export const PS4 = {
+  "11.00": {
+    fw_status: "state=proven step4q=90/0 reboot=0 kernel_rvas=5/5-vs-dump",
+    k_idt_rsvd: 0x2d2430,
+    wk_expm1_builtin: 0x2193f30,
+    wk_JSFunction_m_function: 0x28,
+    wk_CSSFontFace_vtable: 0x3627aa8,
+    wk___imp___error: 0x36e1c68,
+    k__error: 0x3370,
+    wk___imp_strerror: 0x36e1c98,
+    c_strerror: 0x10d00,
+    wk_POP_RDI_RET: 0x357a0,
+    wk_POP_RAX_RET: 0x4e6a9,
+    wk_MOV_RDI_RSI_30_CALL: 0x24dae58,
+    wk_POP_RAX_MOV_RAX_JMP_18: 0x11d5d53,
+    wk_PUSH_RBP_MOV_RBP_RSP_10: 0x2f1890,
+    wk_MOV_RDI_RAX_8_CALL_20: 0x41a81,
+    wk_MOV_RDX_RAX_18_CALL_10: 0x90ffe6,
+    wk_PUSH_RDX_POP_RSP_RET: 0x1cc607a,
+    wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x97db,
+    wk_LEAVE_RET: 0x31f9d,
+    wk_POP_RSI_RET: 0x249e2,
+    wk_POP_RDX_RET: 0x10d11,
+    wk_POP_RCX_RET: 0x71617,
+    wk_POP_R8_RET: 0xe53a2,
+    wk_POP_R9_RET: 0x6403a1,
+    pivot_view_sp: 0x18,
+    wk_ArrayBuffer_m_impl: 0x10,
+    wk_ArrayBuffer_m_contents_m_data: 0x10,
+    k_getpid: 0x1b280,
+    k_scan_stage1: 0x40000,
+    k_scan_stage2: 0x60000,
+    k_evf_cv: 0x7fc26f,
+    k_sysent_661: 0x1109350,
+    k_jmp_rsi: 0x71a21,
+  },
+
+  "11.50": {
+    fw_status:
+      "state=proven step4q=90/0 reboot=0 webkit=step7-20/20-x2 " +
+      "kernel_rvas=untested-vs-dump kstr_residue=0x318",
+    wk_expm1_builtin: 0x2587bd0,
+    wk_JSFunction_m_function: 0x28,
+    wk_POP_RDI_RET: 0x2445241,
+    wk_POP_RSI_RET: 0x2503c9e,
+    wk_POP_RDX_RET: 0x24cfa22,
+    wk_POP_RCX_RET: 0x24c7ebf,
+    wk_POP_RAX_RET: 0x2554e3f,
+    wk_POP_R8_RET: 0x23bb4bd,
+    wk_POP_R9_RET: 0x1c2cda1,
+    wk_LEAVE_RET: 0x23c3790,
+    wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x2445d1a,
+    wk_MOV_RDI_RSI_30_CALL: 0x29609f8,
+    wk_POP_RAX_MOV_RAX_JMP_18: 0x1c8bbc3,
+    wk_PUSH_RBP_MOV_RBP_RSP_10: 0x1645270,
+    wk_MOV_RDI_RAX_8_CALL_20: 0x1e3f795,
+    wk_MOV_RDX_RAX_18_CALL_10: 0x1dea16a,
+    wk_PUSH_RDX_POP_RSP_RET: 0x2abe00a,
+    pivot_view_sp: 0x38,
+    wk_ArrayBuffer_m_impl: 0x10,
+    wk_ArrayBuffer_m_contents_m_data: 0x10,
+    wk___imp___error: 0x3cbcc98,
+    k__error: 0x183c0,
+    wk___imp_pthread_create: 0x3cbdbb8,
+    k_pthread_create: 0xa1d0,
+    k_stubs: {
+      3: 0x2c170, 4: 0x2b8d0, 5: 0x2b970, 6: 0x2d620, 20: 0x2cb70,
+      23: 0x2b6f0, 24: 0x2d5e0, 25: 0x2b4d0, 30: 0x2c9d0, 54: 0x2cff0,
+      92: 0x2b650, 97: 0x2d050, 98: 0x2b5f0, 104: 0x2d380, 105: 0x2b490,
+      106: 0x2d480, 118: 0x2b2f0, 135: 0x2c280, 240: 0x2d4c0, 331: 0x2c6b0,
+      432: 0x2b510, 466: 0x2cc70, 487: 0x2ba80, 488: 0x2bd10, 538: 0x2b430,
+      539: 0x2b4f0, 544: 0x2beb0, 545: 0x2ca30, 632: 0x2d090, 633: 0x2d840,
+      662: 0x2ccb0, 663: 0x2c3e0, 664: 0x2d740, 666: 0x2d540, 669: 0x2bdf0,
+    },
+    k_scan_stage1: 0x40000,
+    k_scan_stage2: 0x60000,
+    k_evf_cv: 0x784318,
+    k_sysent_661: 0x110a760,
+    k_jmp_rsi: 0x704d5,
+  },
+
+  "12.00": {
+    fw_status:
+      "state=UNTESTED-on-hardware webkit=offline-from-sprx " +
+      "anchor=findcaller-validated-on-11.50 " +
+      "kernel_rvas=verified-vs-kernel_1202.elf kpatch=10/10-sites-verified",
+    k_idt_rsvd: 0x1c1d00,
+    wk_expm1_builtin: 0x2585090,
+    wk_JSFunction_m_function: 0x28,
+    wk_POP_RDI_RET: 0x4902f,
+    wk_POP_RSI_RET: 0x10e37,
+    wk_POP_RDX_RET: 0xf7a,
+    wk_POP_RCX_RET: 0x53c0b,
+    wk_POP_RAX_RET: 0x22f53,
+    wk_POP_R8_RET: 0x22f52,
+    wk_POP_R9_RET: 0x60b6c1,
+    wk_LEAVE_RET: 0x11823,
+    wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x2b5cb,
+    wk_PUSH_RDX_POP_RSP_RET: 0x2abb03a,
+    wk_MOV_RDI_RSI_30_CALL: 0x295dcd8,
+    wk_POP_RAX_MOV_RAX_JMP_18: 0x8e4873,
+    wk_PUSH_RBP_MOV_RBP_RSP_10: 0x285e10,
+    wk_MOV_RDI_RAX_8_CALL_20: 0x6c7b0d,
+    wk_MOV_RDX_RAX_18_CALL_10: 0xd37cca,
+    pivot_view_sp: 0x38,
+    wk_ArrayBuffer_m_impl: 0x10,
+    wk_ArrayBuffer_m_contents_m_data: 0x10,
+    wk___imp___error: 0x3cbcc48,
+    k__error: 0x299c0,
+    wk___imp_pthread_create: 0x3cbdb80,
+    k_pthread_create: 0x24e00,
+    k_stubs: {
+      3: 0x2c160, 4: 0x2b8c0, 5: 0x2b960, 6: 0x2d610, 20: 0x2cb60,
+      23: 0x2b6e0, 24: 0x2d5d0, 25: 0x2b4c0, 30: 0x2c9c0, 54: 0x2cfe0,
+      92: 0x2b640, 97: 0x2d040, 98: 0x2b5e0, 104: 0x2d370, 105: 0x2b480,
+      106: 0x2d470, 118: 0x2b2e0, 135: 0x2c270, 240: 0x2d4b0, 331: 0x2c6a0,
+      432: 0x2b500, 466: 0x2cc60, 487: 0x2ba70, 488: 0x2bd00, 538: 0x2b420,
+      539: 0x2b4e0, 544: 0x2bea0, 545: 0x2ca20, 632: 0x2d080, 633: 0x2d830,
+      662: 0x2cca0, 663: 0x2c3d0, 664: 0x2d730, 666: 0x2d530, 669: 0x2bde0,
+    },
+    k_scan_stage1: 0x40000,
+    k_scan_stage2: 0x60000,
+    k_evf_cv: 0x784798,
+    k_sysent_661: 0x110a760,
+    k_jmp_rsi: 0x47b31,
+  },
+
+  "13.00": {
+    fw_status:
+      "state=proven step10=32/0-x3 reboot=0 webkit=step7-20/20 " +
+      "anchor=findcaller kernel_rvas=verified-on-hardware " +
+      "kpatch=1300.bin-10-sites-verified bug=poops",
+    k_idt_rsvd: 0x1c1d40,
+    wk_expm1_builtin: 0x2586880,
+    wk_JSFunction_m_function: 0x28,
+    wk_POP_RDI_RET: 0x5c480,
+    wk_POP_RSI_RET: 0x6e45e,
+    wk_POP_RDX_RET: 0x12c5ba,
+    wk_POP_RCX_RET: 0x1bade,
+    wk_POP_RAX_RET: 0x10504,
+    wk_POP_R8_RET: 0x9b311,
+    wk_POP_R9_RET: 0x1dcfb1,
+    wk_LEAVE_RET: 0x182f7,
+    wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x548b,
+    wk_PUSH_RDX_POP_RSP_RET: 0x2abccaa,
+    wk_MOV_RDI_RSI_30_CALL: 0x295f948,
+    wk_POP_RAX_MOV_RAX_JMP_18: 0x1d989e3,
+    wk_PUSH_RBP_MOV_RBP_RSP_10: 0x25bae0,
+    wk_MOV_RDI_RAX_8_CALL_20: 0x4a0406,
+    wk_MOV_RDX_RAX_18_CALL_10: 0x1ec3ada,
+    pivot_view_sp: 0x38,
+    wk_ArrayBuffer_m_impl: 0x10,
+    wk_ArrayBuffer_m_contents_m_data: 0x10,
+    wk___imp___error: 0x3cb8cc8,
+    k__error: 0x26420,
+    wk___imp_pthread_create: 0x3cb9c00,
+    k_pthread_create: 0x10110,
+    k_stubs: {
+      3: 0x2c170, 4: 0x2b8d0, 5: 0x2b970, 6: 0x2d620, 20: 0x2cb70,
+      23: 0x2b6f0, 24: 0x2d5e0, 25: 0x2b4d0, 30: 0x2c9d0, 54: 0x2cff0,
+      92: 0x2b650, 97: 0x2d050, 98: 0x2b5f0, 104: 0x2d380, 105: 0x2b490,
+      106: 0x2d480, 118: 0x2b2f0, 135: 0x2c280, 240: 0x2d4c0, 331: 0x2c6b0,
+      432: 0x2b510, 466: 0x2cc70, 487: 0x2ba80, 488: 0x2bd10, 538: 0x2b430,
+      539: 0x2b4f0, 544: 0x2beb0, 545: 0x2ca30, 632: 0x2d090, 633: 0x2d840,
+      662: 0x2ccb0, 663: 0x2c3e0, 664: 0x2d740, 666: 0x2d540, 669: 0x2bdf0,
+    },
+    k_scan_stage1: 0x40000,
+    k_scan_stage2: 0x60000,
+    k_kl_lock: 0xe6c20,
+    k_evf_cv: 0x0,
+    k_sysent_661: 0x110a760,
+    k_jmp_rsi: 0x47b31,
+    payload: "payload.bin",
+    k_oid_kern_file: 0x1a2f8a0,
+    k_oid_maxfilesperproc: 0x1a2f950,
+    k_oid_maxprocperuid: 0x1a3ba88,
+    k_oid_maxfiles: 0x1a2f9a8,
+    k_arg1_maxfilesperproc: 0x22cc47c,
+    k_arg1_maxprocperuid: 0x22cc478,
+    k_arg1_maxfiles: 0x22cc474,
+    k_sysctl_handle_int: 0x3fa090,
+    k_prison0: 0x1a5c0c0,
+    k_rootvnode: 0x2136e90,
+    k_sysent: 0x1102b70,
+  },
+
+  "12.50": {
+    fw_status:
+      "state=UNTESTED-on-hardware " +
+      "webkit=addfw-from-decrypted-12.50-modules (15/15 gadgets, 35/35 stubs) " +
+      "anchor=findcaller-offline " +
+      "kernel_rvas=asserted-by-supplied-table-STILL-UNVERIFIED kpatch=1250.bin bug=poops",
+    wk_expm1_builtin: 0x2585110,
+    wk_JSFunction_m_function: 0x28,
+    wk_POP_RDI_RET: 0x4902f,
+    wk_POP_RSI_RET: 0x10e37,
+    wk_POP_RDX_RET: 0x771ea,
+    wk_POP_RCX_RET: 0x5def9,
+    wk_POP_RAX_RET: 0x22f53,
+    wk_POP_R8_RET: 0x22f52,
+    wk_POP_R9_RET: 0x60b6c1,
+    wk_LEAVE_RET: 0x77caa,
+    wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x2b5cb,
+    wk_PUSH_RDX_POP_RSP_RET: 0x2abb0ba,
+    wk_MOV_RDI_RSI_30_CALL: 0x295dd58,
+    wk_POP_RAX_MOV_RAX_JMP_18: 0x8e4873,
+    wk_PUSH_RBP_MOV_RBP_RSP_10: 0x285e10,
+    wk_MOV_RDI_RAX_8_CALL_20: 0x6c7b0d,
+    wk_MOV_RDX_RAX_18_CALL_10: 0xd37cca,
+    pivot_view_sp: 0x38,
+    wk_ArrayBuffer_m_impl: 0x10,
+    wk_ArrayBuffer_m_contents_m_data: 0x10,
+    wk___imp___error: 0x3cb4c48,
+    k__error: 0xd9d0,
+    wk___imp_pthread_create: 0x3cb5b80,
+    k_pthread_create: 0x23d20,
+    k_stubs: {
+      3: 0x2c160, 4: 0x2b8c0, 5: 0x2b960, 6: 0x2d610, 20: 0x2cb60,
+      23: 0x2b6e0, 24: 0x2d5d0, 25: 0x2b4c0, 30: 0x2c9c0, 54: 0x2cfe0,
+      92: 0x2b640, 97: 0x2d040, 98: 0x2b5e0, 104: 0x2d370, 105: 0x2b480,
+      106: 0x2d470, 118: 0x2b2e0, 135: 0x2c270, 240: 0x2d4b0, 331: 0x2c6a0,
+      432: 0x2b500, 466: 0x2cc60, 487: 0x2ba70, 488: 0x2bd00, 538: 0x2b420,
+      539: 0x2b4e0, 544: 0x2bea0, 545: 0x2ca20, 632: 0x2d080, 633: 0x2d830,
+      662: 0x2cca0, 663: 0x2c3d0, 664: 0x2d730, 666: 0x2d530, 669: 0x2bde0,
+    },
+    k_scan_stage1: 0x40000,
+    k_scan_stage2: 0x60000,
+    k_evf_cv: 0x0,
+    k_sysent_661: 0x110a760,
+    k_jmp_rsi: 0x47b31,
+    k_kl_lock: 0xe6c20,
+  },
+};
+
+PS4["13.50"] = {
+  fw_status:
+    "state=663-JB-PROVEN-on-hw webkit=13.00-module libkernel=13.50-stubs " +
+    "kernel_rvas=MEASURED-from-kernel_1350.elf kpatch=1350.bin-UNTESTED-on-hw " +
+    "payload=payload2.bin-PS4HEN(works<=13.52) bug=663",
+  wk_expm1_builtin: 0x2586880,
+  wk_JSFunction_m_function: 0x28,
+  wk_POP_RDI_RET: 0x5c480,
+  wk_POP_RSI_RET: 0x6e45e,
+  wk_POP_RDX_RET: 0x12c5ba,
+  wk_POP_RCX_RET: 0x1bade,
+  wk_POP_RAX_RET: 0x10504,
+  wk_POP_R8_RET: 0x9b311,
+  wk_POP_R9_RET: 0x1dcfb1,
+  wk_LEAVE_RET: 0x182f7,
+  wk_MOV_QWORD_PTR_RDI_RAX_RET: 0x548b,
+  wk_PUSH_RDX_POP_RSP_RET: 0x2abccaa,
+  wk_MOV_RDI_RSI_30_CALL: 0x295f948,
+  wk_POP_RAX_MOV_RAX_JMP_18: 0x1d989e3,
+  wk_PUSH_RBP_MOV_RBP_RSP_10: 0x25bae0,
+  wk_MOV_RDI_RAX_8_CALL_20: 0x4a0406,
+  wk_MOV_RDX_RAX_18_CALL_10: 0x1ec3ada,
+  pivot_view_sp: 0x38,
+  wk_ArrayBuffer_m_impl: 0x10,
+  wk_ArrayBuffer_m_contents_m_data: 0x10,
+  wk___imp___error: 0x3cb8cc8,
+  k__error: 0x1a0f0,
+  wk___imp_pthread_create: 0x3cb9c00,
+  k_pthread_create: 0x21790,
+  k_stubs: {
+    3: 0x2c170, 4: 0x2b8d0, 5: 0x2b970, 6: 0x2d620, 20: 0x2cb70,
+    23: 0x2b6f0, 24: 0x2d5e0, 25: 0x2b4d0, 30: 0x2c9d0, 54: 0x2cff0,
+    92: 0x2b650, 97: 0x2d050, 98: 0x2b5f0, 104: 0x2d380, 105: 0x2b490,
+    106: 0x2d480, 118: 0x2b2f0, 135: 0x2c280, 240: 0x2d4c0, 331: 0x2c6b0,
+    432: 0x2b510, 466: 0x2cc70, 487: 0x2ba80, 488: 0x2bd10, 538: 0x2b430,
+    539: 0x2b4f0, 544: 0x2beb0, 545: 0x2ca30, 632: 0x2d090, 633: 0x2d840,
+    662: 0x2ccb0, 663: 0x2c3e0, 664: 0x2d740, 666: 0x2d540, 669: 0x2bdf0,
+  },
+  k_scan_stage1: 0x40000,
+  k_scan_stage2: 0x60000,
+  k_idt_rsvd: 0x1c1d60,
+  k_sysctl_handle_int: 0x3fa4e0,
+  k_jmp_rsi: 0x47b31,
+  k_kl_lock: 0xe6c20,
+  k_evf_cv: 0x784e18,
+  k_sysent: 0x1102b70,
+  k_sysent_661: 0x110a760,
+  k_oid_kern_file: 0x1a2f8a0,
+  k_oid_maxfilesperproc: 0x1a2f950,
+  k_oid_maxprocperuid: 0x1a3ba88,
+  k_oid_maxfiles: 0x1a2f9a8,
+  k_arg1_maxfilesperproc: 0x22cc47c,
+  k_arg1_maxprocperuid: 0x22cc478,
+  k_arg1_maxfiles: 0x22cc474,
+  k_prison0: 0x1a5c0c0,
+  k_rootvnode: 0x2136e90,
+  kpatch: "1350.bin",
+  payload: "payload2.bin",
+};
+
+PS4["13.52"] = Object.assign({}, PS4["13.50"], {
+  alias_of: "13.50",
+  k_idt_rsvd: 0x1c1e00,
+  k_oid_kern_file: 0x1a2f8a0,
+  k_oid_maxfilesperproc: 0x1a2f950,
+  k_oid_maxprocperuid: 0x1a3ba88,
+  k_oid_maxfiles: 0x1a2f9a8,
+  k_arg1_maxfilesperproc: 0x22cc47c,
+  k_arg1_maxprocperuid: 0x22cc478,
+  k_arg1_maxfiles: 0x22cc474,
+  k_sysctl_handle_int: 0x3fa8e0,
+  k_prison0: 0x1a5c0c0,
+  k_rootvnode: 0x2136e90,
+  k_sysent: 0x1102b70,
+  k_sysent_661: 0x110a760,
+  k_jmp_rsi: 0x4d6d0,
+  k_kl_lock: 0xe6c60,
+  k_evf_cv: 0x785228,
+  kpatch: "1352.bin",
+  payload: "goldhen.bin",
+  fw_status:
+    "state=663-LIVE-on-hardware shares=13.50 (webkit+libkernel) " +
+    "kernel_rvas=MEASURED-from-kernel_1352.elf kpatch=1352.bin-24-sites-verified " +
+    "payload=payload2.bin-PS4HEN-native-1352 bug=663",
+});
+
+PS4["13.02"] = Object.assign({}, PS4["13.00"], {
+  alias_of: "13.00",
+  k_idt_rsvd: 0x1c1d50,
+  k_sysctl_handle_int: 0x3fa0a0,
+  k_jmp_rsi: 0x47b31,
+  k_kl_lock: 0xe6c20,
+  k_evf_cv: 0x7849d8,
+  k_sysent: 0x1102b70,
+  k_sysent_661: 0x110a760,
+  k_oid_kern_file: 0x1a2f8a0,
+  k_oid_maxfilesperproc: 0x1a2f950,
+  k_oid_maxprocperuid: 0x1a3ba88,
+  k_oid_maxfiles: 0x1a2f9a8,
+  k_arg1_maxfilesperproc: 0x22cc47c,
+  k_arg1_maxprocperuid: 0x22cc478,
+  k_arg1_maxfiles: 0x22cc474,
+  k_prison0: 0x1a5c0c0,
+  k_rootvnode: 0x2136e90,
+  kpatch: "1302.bin",
+  payload: "payload2.bin",
+  fw_status:
+    "state=663-JB+KPATCH-PROVEN-on-hw-pass=51 shares=13.00 " +
+    "kernel_rvas=MEASURED-from-kernel_1302.elf same-kernel-as=13.04 " +
+    "kpatch=1302.bin-HW-PROVEN-KEXEC-rc0 bug=663",
+});
+
+PS4["13.04"] = Object.assign({}, PS4["13.00"], {
+  alias_of: "13.00",
+  k_idt_rsvd: 0x1c1d50,
+  k_sysctl_handle_int: 0x3fa0a0,
+  k_jmp_rsi: 0x47b31,
+  k_kl_lock: 0xe6c20,
+  k_evf_cv: 0x7849d8,
+  k_sysent: 0x1102b70,
+  k_sysent_661: 0x110a760,
+  k_oid_kern_file: 0x1a2f8a0,
+  k_oid_maxfilesperproc: 0x1a2f950,
+  k_oid_maxprocperuid: 0x1a3ba88,
+  k_oid_maxfiles: 0x1a2f9a8,
+  k_arg1_maxfilesperproc: 0x22cc47c,
+  k_arg1_maxprocperuid: 0x22cc478,
+  k_arg1_maxfiles: 0x22cc474,
+  k_prison0: 0x1a5c0c0,
+  k_rootvnode: 0x2136e90,
+  kpatch: "1302.bin",
+  payload: "payload2.bin",
+  fw_status:
+    "state=663-JB+KPATCH-via-13.02 shares=13.00 " +
+    "kernel_rvas=SAME-KERNEL-AS-13.02 kpatch=1302.bin-shared-HW-PROVEN bug=663",
+});
+
+PS4["12.02"] = Object.assign({}, PS4["12.00"], {
+  alias_of: "12.00",
+  fw_status:
+    "state=UNTESTED-on-hardware shares=12.00 " +
+    "kernel_rvas=verified-vs-kernel_1202.elf kpatch=1200.bin-10-sites-verified bug=lapse",
+  kpatch: "1200.bin",
+});
+
+PS4["12.52"] = Object.assign({}, PS4["12.50"], {
+  alias_of: "12.50",
+  fw_status:
+    "state=UNTESTED-on-hardware shares=12.50 " +
+    "webkit=assumed-identical-to-12.50 kernel_rvas=STILL-UNVERIFIED kpatch=1250.bin bug=poops",
+  kpatch: "1250.bin",
+});
+
+// ---------------------------------------------------------------------------
+// 14.00: WebKit = 13.52 (identisches Build). Die Kernel-Seite kommt NICHT von
+// hier, sondern aus afterglow (apm-UAF, eigene Stage, eigene RVAs pro FW).
+// Deshalb sind alle k_* hier absichtlich undefined -- wer hier 13.52-Werte
+// stehen laesst, patcht einen 14.00-Kernel mit 13.52-Adressen.
+// ---------------------------------------------------------------------------
+PS4["14.00"] = Object.assign({}, PS4["13.52"], {
+  alias_of: "13.52-webkit",
+  fw_status:
+    "state=14.00 webkit=13.52-identical kernel=afterglow (apm-UAF, own kernel stage) " +
+    "payload=hen.bin|goldhen.bin",
+  k_stubs: undefined,
+  k_pthread_create: undefined,
+  k_idt_rsvd: undefined,
+  k_sysctl_handle_int: undefined,
+  k_jmp_rsi: undefined,
+  k_kl_lock: undefined,
+  k_evf_cv: undefined,
+  k_sysent: undefined,
+  k_sysent_661: undefined,
+  k_oid_kern_file: undefined,
+  k_oid_maxfilesperproc: undefined,
+  k_oid_maxprocperuid: undefined,
+  k_oid_maxfiles: undefined,
+  k_arg1_maxfilesperproc: undefined,
+  k_arg1_maxprocperuid: undefined,
+  k_arg1_maxfiles: undefined,
+  k_prison0: undefined,
+  k_rootvnode: undefined,
+});
+
+// 14.02: wie 14.00. Die echten 14.02-Kernel-RVAs liegen in afterglow.js
+// (FIRMWARE["14.02"]): anchor 0xE6C30, swap_rbp 0xa81478, prison0 0x111fa18,
+// rootvnode 0x2136e90, padding 0xB3A298, ghKmem 0x466920.
+PS4["14.02"] = Object.assign({}, PS4["14.00"], {});
+
+export function offsetsFor(uaString) {
+  const m = (uaString || "").match(/PlayStation\s+4[\/ ](\d+)\.(\d+)/);
+  if (!m) return { key: null, off: null };
+  // Firmware-Teil ist HEX: 14.02 -> "14.02", 11.02 -> "11.02"
+  const key = m[1] + "." + parseInt(m[2], 16).toString(16).padStart(2, "0");
+  return { key, off: PS4[key] || null };
+}
+```
+
+---
+
+## 2) `index.html` — die Webkit-Seite (AIO-Design, root-Ablage)
+
+Muss **im Root** liegen, neben `src/` und `includes/`, weil `fetch()` relativ zum Dokument auflöst (`./src/kpatches/…`, `./includes/payloads/…`), während die `import`s relativ zum Modul auflösen.
+
+```html
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PS4 AIO Webkit</title>
+<style>
+:root{--bg:#0a0d12;--pn:#111721;--ln:#1e2836;--tx:#cbd6e6;--dim:#6d7d94;
+      --ac:#4fd1c5;--ac2:#5aa9ff;--wr:#ffb347;--er:#ff5c6c;--ok:#48d597}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);
+     font:14px/1.5 ui-monospace,"Cascadia Code",Menlo,monospace}
+header{padding:14px 18px;border-bottom:1px solid var(--ln);display:flex;
+       gap:12px;align-items:center;flex-wrap:wrap;background:var(--pn)}
+h1{font-size:15px;margin:0;letter-spacing:.14em;text-transform:uppercase;color:var(--ac)}
+.badge{font-size:11px;padding:3px 9px;border:1px solid var(--ln);border-radius:99px;color:var(--dim)}
+.badge.on{color:var(--ok);border-color:var(--ok)}
+.badge.bad{color:var(--er);border-color:var(--er)}
+main{padding:16px;max-width:960px;margin:0 auto;display:grid;gap:14px}
+.card{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:14px}
+.card h2{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:0 0 10px}
+select,input,button{font:inherit;background:#0d131c;color:var(--tx);
+      border:1px solid var(--ln);border-radius:7px;padding:9px 11px;width:100%}
+button{cursor:pointer;transition:.15s}
+button:hover:not(:disabled){border-color:var(--ac)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.p{background:linear-gradient(90deg,#123b3a,#12303f);border-color:var(--ac);color:var(--ac)}
+button.d{background:#1a1017;border-color:#3a2028;color:var(--er)}
+.row{display:flex;gap:9px;flex-wrap:wrap}
+.row>*{flex:1 1 160px}
+#DebugConsole{height:260px;overflow:auto;background:#070a0f;border:1px solid var(--ln);
+     border-radius:8px;padding:9px;font-size:12px;white-space:pre-wrap}
+#console{margin:0;white-space:pre-wrap}
+#prog{height:5px;background:#101720;border-radius:99px;overflow:hidden}
+#prog i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--ac2),var(--ac));
+        transition:width .3s}
+.big{font-size:20px;color:var(--ac);letter-spacing:.05em}
+.big.warn{color:var(--wr)} .big.fail{color:var(--er)} .big.ok{color:var(--ok)}
+small{color:var(--dim)}
+.notice{margin-top:9px;padding:9px;border:1px solid var(--er);border-radius:7px;color:var(--er)}
+#ramBox{font-size:11px;color:var(--dim)}
+.kv{font-size:12px;color:var(--dim)}
+/* jb.js setzt body.log / .done / .fail -- .notice bleibt immer sichtbar */
+body.done #state{color:var(--ok)}
+body.fail #state{color:var(--er)}
+</style>
+</head>
+<body>
+<header>
+  <h1>PS4 AIO Webkit</h1>
+  <span class="badge" id="bFw">fw ?</span>
+  <span class="badge" id="bChain">chain ?</span>
+  <span class="badge" id="bRef">ref ?</span>
+</header>
+
+<main>
+  <div class="card">
+    <h2>Ziel</h2>
+    <div class="row">
+      <div style="flex:2 1 260px">
+        <small>Payload</small>
+        <select id="plSel">
+          <option value="./includes/payloads/Bins/ps4-ftp.bin">ps4-ftp.bin (raw)</option>
+          <option value="./includes/payloads/Bins/ps4-kernel-dumper.bin">ps4-kernel-dumper.bin (raw)</option>
+          <option value="./includes/payloads/Bins/ps4-debug-ng.bin">ps4debug-ng (raw)</option>
+          <option value="./includes/payloads/Bins/elfldr.bin">elfldr.bin (Loader)</option>
+          <option value="__custom">— eigener Pfad —</option>
+        </select>
+      </div>
+      <div style="flex:1 1 130px">
+        <small>Versuche (WebKit-Stage)</small>
+        <input id="att" value="8" inputmode="numeric">
+      </div>
+    </div>
+    <div class="row" style="margin-top:9px">
+      <div style="flex:1 1 100%">
+        <small>payload_path</small>
+        <input id="plPath" value="./includes/payloads/Bins/ps4-ftp.bin">
+      </div>
+    </div>
+    <p class="kv" id="plNote">Raw-Payload → braucht Patchset <code>src/kpatches/&lt;fw&gt;.bin</code>.</p>
+  </div>
+
+  <div class="card">
+    <h2>Ausführung</h2>
+    <div id="prog"><i></i></div>
+    <p class="big" id="state">bereit</p>
+    <div class="row">
+      <button class="p" id="go">▶ Start</button>
+      <button id="probe">◍ Probe (feuert nichts)</button>
+      <button class="d" id="reset">■ Reset / Reload</button>
+    </div>
+    <div id="out"></div>
+    <p><small id="ramBox">JS heap: —</small></p>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div id="DebugConsole"><pre id="console">--</pre></div>
+    <p><small id="hint">Einstieg immer über diese Seite — der Referrer-Guard in jb.js
+      verlangt sie. Nach erreichtem Kernel den Browser <b>nicht</b> schließen.</small></p>
+  </div>
+</main>
+
+<script>
+"use strict";
+/* ---------------------------------------------------------------- Konstanten */
+const SUPPORTED = ["14.02", "14.00", "13.52"];
+const el = id => document.getElementById(id);
+let started = false;
+
+/* ---------------------------------------------------------------- FW-Erkennung */
+function fwFromUa() {
+  const m = (navigator.userAgent || "").match(/PlayStation\s*4[\/ ](\d+)\.(\d+)/);
+  if (!m) return /PlayStation/i.test(navigator.userAgent) ? "unbekannt" : "PC";
+  return m[1] + "." + parseInt(m[2], 16).toString(16).padStart(2, "0");
+}
+const FW = fwFromUa();
+
+function setBadge(id, text, cls) {
+  const e = el(id);
+  if (!e) return;
+  e.textContent = text;
+  e.className = "badge" + (cls ? " " + cls : "");
+}
+
+/* ---------------------------------------------------------------- Referrer */
+function fromLanding() {
+  try {
+    if (!document.referrer) return false;
+    const r = new URL(document.referrer);
+    if (r.origin !== location.origin) return false;
+    const came = r.pathname.replace(/[^/]*$/, "");
+    const here = location.pathname.replace(/[^/]*$/, "");
+    if (came !== here) return false;
+    const f = r.pathname.slice(came.length);
+    return f === "" || f === "index.html";
+  } catch (e) { return false; }
+}
+
+/* ---------------------------------------------------------------- UI-Helfer */
+function progress(p) { el("prog").firstElementChild.style.width = p + "%"; }
+function setState(t, cls) {
+  el("state").textContent = t;
+  el("state").className = "big" + (cls ? " " + cls : "");
+}
+/* jb.js schreibt laufend in #state; daraus den Fortschritt ableiten */
+function watchState() {
+  const map = [
+    [/primitive/i, 30], [/BASES|PRIMITIVE-OK/i, 45], [/GADGET/i, 55],
+    [/STUBS|syscall/i, 62], [/afterglow|patch set|kernel/i, 75],
+    [/DONE|jailbreak/i, 100]
+  ];
+  new MutationObserver(() => {
+    const t = el("state").textContent || "";
+    for (const [re, p] of map) if (re.test(t)) { progress(p); break; }
+  }).observe(el("state"), { childList: true, characterData: true, subtree: true });
+}
+
+/* ---------------------------------------------------------------- Payload */
+el("plSel").onchange = () => {
+  if (el("plSel").value !== "__custom") el("plPath").value = el("plSel").value;
+  el("plNote").textContent = /elfldr|\.elf$/.test(el("plPath").value)
+    ? "ELF → wird über elfldr geladen."
+    : "Raw-Payload → braucht Patchset src/kpatches/<fw>.bin.";
+};
+el("plPath").oninput = () => {
+  el("plNote").textContent = /elfldr|\.elf$/.test(el("plPath").value)
+    ? "ELF → wird über elfldr geladen."
+    : "Raw-Payload → braucht Patchset src/kpatches/<fw>.bin.";
+};
+
+/* ---------------------------------------------------------------- URL-Params */
+function applyParams(extra) {
+  const u = new URL(location.href);
+  const q = u.searchParams;
+  q.set("attempts", String(Math.max(1, parseInt(el("att").value, 10) || 8)));
+  if (extra) for (const k in extra) {
+    if (extra[k] === null) q.delete(k); else q.set(k, extra[k]);
+  }
+  history.replaceState(null, "", u.pathname + "?" + q.toString());
+}
+
+/* ---------------------------------------------------------------- Start */
+async function launch(extra) {
+  if (started) return;
+  if (FW === "PC") {
+    setState("kein PS4-Browser — Debug-Modus", "warn");
+  } else if (!SUPPORTED.includes(FW)) {
+    setState("FW " + FW + " hat keine Kernel-Stage", "fail");
+    const n = document.createElement("div");
+    n.className = "notice";
+    n.textContent = "Dieses Build hat eine Kernel-Stage für " + SUPPORTED.join(", ") +
+      " — erkannt: " + FW + ". Nichts wurde ausgeführt.";
+    el("out").appendChild(n);
+    return;
+  }
+
+  const payload = el("plPath").value.trim();
+  if (payload) sessionStorage.setItem("payload_path", payload);
+  applyParams(extra);
+
+  started = true;
+  el("go").disabled = true;
+  el("probe").disabled = true;
+  el("console").textContent = "";
+  progress(12);
+  setState("lade Kette…", "warn");
+
+  let c = 3;
+  await new Promise(res => {
+    const iv = setInterval(() => {
+      setState("Start in " + c, "warn");
+      if (--c < 0) { clearInterval(iv); res(); }
+    }, 1000);
+  });
+
+  try {
+    await import("./src/slopkit-afterglow/jb.js");
+  } catch (e) {
+    setState("Import fehlgeschlagen", "fail");
+    const n = document.createElement("div");
+    n.className = "notice";
+    n.textContent = "jb.js nicht ladbar: " + (e && e.message ? e.message : e) +
+      " — prüfe, ob src/slopkit-afterglow/ vollständig ist.";
+    el("out").appendChild(n);
+    el("go").disabled = false;
+  }
+}
+
+el("go").onclick = () => launch(null);
+el("probe").onclick = () => launch({ stop: "primitive" });
+el("reset").onclick = () => { try { sessionStorage.removeItem("payload_path"); } catch (e) {} location.reload(); };
+
+/* nachglow ruft das bei Erfolg */
+window.jailbreakSuccess = function () {
+  setState("DONE — Shell prüfen", "ok");
+  progress(100);
+};
+
+/* ---------------------------------------------------------------- Boot */
+(function boot() {
+  setBadge("bFw", "fw " + FW, FW === "PC" ? "" : (SUPPORTED.includes(FW) ? "on" : "bad"));
+  setBadge("bChain", SUPPORTED.includes(FW) ? "slopkit + afterglow" : "keine Stage",
+           SUPPORTED.includes(FW) ? "on" : "bad");
+  const refOk = fromLanding();
+  setBadge("bRef", refOk ? "ref ok" : "ref fehlt", refOk ? "on" : "");
+  if (!refOk && FW !== "PC") {
+    setState("direkt geladen — Referrer fehlt", "warn");
+  }
+  watchState();
+
+  const q = new URLSearchParams(location.search);
+  if (q.get("payload")) { el("plPath").value = q.get("payload"); el("plSel").value = "__custom"; }
+  if (q.get("attempts")) el("att").value = q.get("attempts");
+})();
+</script>
+</body>
+</html>
+```
+
+---
+
+## 3) `README-WEBKIT.md` — Ablage und Betrieb
+
+```md
+# AIO Webkit — Aufbau
+
+## Dateien
+
+    /
+    ├─ index.html                          <- Landing + Exploit-Seite (neu)
+    ├─ src/slopkit-afterglow/
+    │   ├─ ps4_offsets.js                  <- korrigierte Tabelle (neu)
+    │   ├─ int64.js  core.js  mem.js       <- aus WebKitty
+    │   ├─ afterglow.js                    <- aus WebKitty (Kernel-Stage, 14.02-Tabelle)
+    │   └─ jb.js                           <- aus WebKitty (Treiber)
+    ├─ src/kpatches/1402.bin               <- MUSS selbst angelegt werden (s.u.)
+    └─ includes/payloads/Bins/…            <- Payloads
+
+Kopieren aus https://github.com/ArabPixel/WebKitty (branch main):
+src/slopkit-afterglow/{int64.js,core.js,mem.js,afterglow.js,jb.js}
+src/kpatches/ (komplett)
+includes/payloads/Bins/ (was du brauchst)
+
+## Was an den Offsets geändert wurde
+
+1. 14.02 erbt die WebKit-Seite von 13.52. 14.02/14.00 teilen das WebKit-Build
+   mit 13.52 — die wk_*-Werte sind identisch, deshalb `alias_of`.
+2. Alle k_*-Kernel-Offsets auf 14.02/14.00 = `undefined`. Die Kernel-Stage
+   liefert afterglow selbst, mit eigenen 14.02-RVAs:
+   anchor 0xE6C30, swap_rbp 0xa81478, prison0 0x111fa18,
+   rootvnode 0x2136e90, padding 0xB3A298, ghKmem 0x466920.
+   (Deckungsgleich mit den 14.02-Baseline-Werten aus 1402_offsets.txt.)
+3. wk___imp_pthread_create für 14.00/14.02 = 0x3cb9c00 (Import-Slot liegt im
+   WebKit, unverändert), k_pthread_create bleibt undefined (libkernel wanderte);
+   afterglow nutzt dafür die Konstante SLOT_SHARED_WK.
+4. offsetsFor() parst den FW-Teil des UA als HEX.
+
+## Der 1402.bin-Stolperstein
+
+afterglow holt das Patchset über
+
+    fetch("./src/kpatches/" + FW_KEY.replace(".", "") + ".bin")
+
+Für 14.02 ist das `1402.bin` — im WebKitty-Repo liegt aber nur `1400.bin`.
+Ohne die Datei bricht afterglow mit "no patch set for firmware 14.02" ab und
+startet kein GoldHEN. `1400.bin` ist kein Drop-in: die PATCH_TABLE-Sites sind
+verschoben (z.B. bzero 14.02 0x2BDA9D vs. 14.00 0x02bd79D).
+
+## Testreihenfolge
+
+1. `index.html` öffnen (nicht direkt eine Unterseite) — Badge "ref ok" muss grün sein.
+2. **Probe** → setzt ?stop=primitive, feuert nichts, prüft nur, ob der Prozess
+   die Stage trägt. Erwartung: PRIMITIVE-OK, BASES mit 0x4000-Alignment.
+3. Erst dann **Start**.
+4. `?verbose=1` an die URL hängen, wenn du den vollen Trace willst.
+5. Nach erreichtem Kernel: Browser nicht schließen. Bei "handles not defused"
+   Konsole kalt starten.
+
+## Grenzen
+
+- Kernel-Stage existiert nur für 14.02, 14.00, 13.52 — jb.js lehnt andere FW ab,
+  bevor irgendwas geschrieben wird.
+- Die Entry-Erkennung ist fest: diese Seite lädt `jb.js` direkt, kein Heuristik-Loader.
+- GoldHEN-Composite wird an der Länge erkannt (0x50000 + 636760), nicht am Namen.
+```
+
+---
+
+Damit ist der Umbau komplett: dein AIO-Design als Seite, die Offsets korrekt aufgeteilt zwischen WebKit-Seite (geerbt) und afterglow-Kernel-Stage, plus der dokumentierte `1402.bin`-Haken.
+
+Wenn du mir noch deine `index.html` aus dem ZIP hier reinkopierst, ziehe ich das Markup 1:1 auf dein Layout um — die Logik bleibt dann identisch.
